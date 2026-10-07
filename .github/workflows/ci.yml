@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    # spacemap runs on macOS and Linux (Finder vs xdg-open, APFS vs ext4 block counts), so it is
+    # tested on both, and on the oldest Ruby the gemspec allows.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        ruby: ["3.4"]
+        include:
+          - os: ubuntu-latest
+            ruby: "3.3"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+      - run: bundle exec rake test

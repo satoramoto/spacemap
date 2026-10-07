@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # r2ui, minitest, rake (no Gemfile.lock: only releases outside a requirement get a PR).
+  # A new r2ui minor raises the requirement in spacemap.gemspec ("increase"); taking it is
+  # spacemap's call, and the next spacemap release ships it (gem and Homebrew formula).
+  - package-ecosystem: bundler
+    directory: /
+    schedule:
+      interval: daily
+    versioning-strategy: increase
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
