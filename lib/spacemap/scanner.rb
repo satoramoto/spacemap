@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "etc"
+require "set"
 
 module Spacemap
   # One file or folder in the scanned tree. Folders hold their whole subtree's size and file count,
@@ -67,6 +68,7 @@ module Spacemap
       @cloud = [0, 0]
       @path = Scanner.utf8(File.expand_path(root))
       @root = Node.new(@path, nil, true, 0, 0, nil, [])
+      @seen = Set.new # [dev, ino] of files with several names, so each counts once
       @lock = Mutex.new
       @kinds = Hash.new { |h, k| h[k] = [0, 0] }
       @generation = 0
@@ -91,15 +93,18 @@ module Spacemap
     # snapshot carrying the error.
     def scan
       started = clock
-      device = File.lstat(@path).dev
+      # Walk the real folder: a symlinked root (/tmp on macOS) would otherwise give the link's
+      # device, and every subfolder would look like another volume. The root keeps its given name.
+      @real = Scanner.utf8(File.realpath(@path))
+      @device = device = File.stat(@real).dev
       errors = @workers.positive? ? walk_parallel(device, started) : walk_inline(device, started)
       publish(true, clock - started, errors)
     rescue StandardError => e
       publish(true, 0.0, 1, e.message)
     end
 
-    # Lists folders: for each [id, path], [id, path, [name, bytes on disk, bytes, dir?, ...]] (nil if
-    # unreadable). Runs inside the walkers, so it touches nothing but its arguments.
+    # Lists folders: for each [id, path], [id, path, [name, bytes on disk, bytes, dir?, ino, ...]] (nil
+    # if unreadable); ino is set only for files with several hard links, nil otherwise. Runs inside the walkers, so it touches nothing but its arguments.
     def self.list(work, device)
       work.map do |id, dir|
         flat = []
@@ -107,8 +112,8 @@ module Spacemap
           Dir.each_child(dir) do |name|
             name = Scanner.utf8(name)
             st = File.lstat(File.join(dir, name))
-            if st.file? then flat.push(name, st.blocks * 512, st.size, false)
-            elsif st.directory? && st.dev == device then flat.push(name, 0, 0, true)
+            if st.file? then flat.push(name, st.blocks * 512, st.size, false, st.nlink > 1 ? st.ino : nil)
+            elsif st.directory? && st.dev == device then flat.push(name, 0, 0, true, nil)
             end
           rescue SystemCallError
             next
@@ -129,7 +134,7 @@ module Spacemap
 
     def walk_inline(device, started)
       @dirs = [@root]
-      pending = [[0, @path]]
+      pending = [[0, @real]]
       errors = 0
       published = started
       until pending.empty?
@@ -142,7 +147,7 @@ module Spacemap
     def walk_parallel(device, started)
       Warning[:experimental] = false # Ractor's "experimental" notice would land on the dashboard
       @dirs = [@root]
-      pending = [[0, @path]]
+      pending = [[0, @real]]
       inbox, workers = start_workers(device)
       inflight = Array.new(workers.size, 0)
       errors = 0
@@ -209,12 +214,13 @@ module Spacemap
         bytes = 0
         files = 0
         kids = dir.children
-        flat.each_slice(4) do |name, on_disk, logical, is_dir|
+        flat.each_slice(5) do |name, on_disk, logical, is_dir, ino|
           if is_dir
             child = Node.new(name, dir, true, 0, 0, nil, [])
             @dirs << child
             pending << [@dirs.size - 1, File.join(dir_path, name)]
           else
+            on_disk = logical = 0 if ino && !@seen.add?([@device, ino]) # a later name of a counted file
             if on_disk.zero? && logical > CLOUD_MIN # a placeholder: its content is in the cloud
               @cloud[0] += 1
               @cloud[1] += logical

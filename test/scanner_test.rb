@@ -70,4 +70,27 @@ class ScannerTest < Minitest::Test
     assert snap.done
     assert_equal 10_000, snap.root.size
   end
+
+  # /tmp on macOS is a symlink; its subfolders must not look like another volume.
+  def test_scanning_a_symlinked_root_walks_the_folder_it_points_to
+    Dir.mktmpdir do |tmp|
+      link = File.join(tmp, "link")
+      File.symlink(@dir, link)
+      snap = scan(link)
+
+      assert_equal link, snap.root.name
+      assert_equal 2000, find(snap.root, "src/a.rb").size
+      assert_equal [10_000, 5], [snap.root.size, snap.root.files]
+    end
+  end
+
+  def test_a_file_with_two_hard_links_counts_once
+    File.link(File.join(@dir, "big.mov"), File.join(@dir, "again.mov"))
+    [2, 0].each do |workers|
+      snap = scan(workers:)
+
+      assert_equal [10_000, 6], [snap.root.size, snap.root.files]
+      assert find(snap.root, "again.mov")
+    end
+  end
 end
