@@ -37,7 +37,7 @@ jobs:
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       FORMULA: tap/Formula/spacemap.rb
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: satoramoto/homebrew-tap
           token: ${{ secrets.TAP_TOKEN }}
