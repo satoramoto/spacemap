@@ -1,0 +1,156 @@
+name: Homebrew
+
+# After Publish puts a release on RubyGems, writes the spacemap formula in satoramoto/homebrew-tap
+# (Formula/spacemap.rb) for it: spacemap's .gem and the newest RubyGems versions its gemspec allows
+# of the gems it depends on (r2ui), with their sha256s. The whole formula is written here, so the
+# first release creates it and a new runtime dependency becomes a resource on its own; edit the
+# formula below, not in the tap. Then it installs the formula from source, runs `brew test` and
+# `brew audit --strict` on macOS, and only then pushes the tap. The formula changes only with a
+# spacemap release. Run it by hand (Actions → Homebrew → Run workflow) to retry.
+#
+# Needs the TAP_TOKEN secret: a fine-grained token with Contents read/write on
+# satoramoto/homebrew-tap. See docs/releasing.md.
+
+on:
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "spacemap version (default: the latest on RubyGems)"
+        required: false
+
+concurrency:
+  group: homebrew
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      FORMULA: tap/Formula/spacemap.rb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: satoramoto/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+
+      - name: Write the formula for the release
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          # A tag-triggered Publish run reports the tag (vX.Y.Z) as its head branch.
+          version="${INPUT:-${TAG#v}}"
+          # RubyGems' API can lag the push by a minute or two.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -z "$version" ] || curl -fsS -o /dev/null "https://rubygems.org/api/v2/rubygems/spacemap/versions/$version.json"; then
+              break
+            fi
+            echo "spacemap $version isn't on RubyGems' API yet (attempt $attempt)"
+            sleep 30
+          done
+          VERSION="$version" ruby -rjson -rnet/http -rfileutils - <<'RUBY'
+            def get(path) = JSON.parse(Net::HTTP.get(URI("https://rubygems.org#{path}")))
+            def gem_url(name, version) = "https://rubygems.org/downloads/#{name}-#{version}.gem"
+
+            version = ENV["VERSION"].to_s
+            version = get("/api/v1/versions/spacemap/latest.json").fetch("version") if version.empty?
+            spacemap = get("/api/v2/rubygems/spacemap/versions/#{version}.json")
+
+            # The newest release of each runtime dependency (and theirs) that the requirements allow.
+            resolved = {}
+            queue = spacemap.dig("dependencies", "runtime").map { [_1["name"], _1["requirements"]] }
+            until queue.empty?
+              name, requirements = queue.shift
+              next if resolved.key?(name)
+              requirement = Gem::Requirement.new(*requirements.split(", "))
+              release = get("/api/v1/versions/#{name}.json")
+                        .reject { _1["prerelease"] || _1["platform"] != "ruby" }
+                        .select { requirement.satisfied_by?(Gem::Version.new(_1["number"])) }
+                        .max_by { Gem::Version.new(_1["number"]) }
+              abort "::error::no release of #{name} satisfies #{requirements}" unless release
+              resolved[name] = release
+              get("/api/v2/rubygems/#{name}/versions/#{release["number"]}.json")
+                .dig("dependencies", "runtime").each { queue << [_1["name"], _1["requirements"]] }
+            end
+
+            resources = resolved.sort.map do |name, release|
+              %(  resource "#{name}" do\n    url "#{gem_url(name, release["number"])}"\n) +
+                %(    sha256 "#{release.fetch("sha")}"\n  end\n)
+            end
+            formula = <<~'FORMULA'
+              class Spacemap < Formula
+                desc "Disk usage treemap for the terminal, like Disk Inventory X"
+                homepage "https://github.com/satoramoto/spacemap"
+                url "@URL@"
+                sha256 "@SHA256@"
+                license "MIT"
+
+                depends_on "ruby"
+
+                # Runtime gems, installed into libexec next to spacemap.
+              @RESOURCES@
+                def install
+                  ENV["GEM_HOME"] = libexec
+                  # brew fetches and verifies every resource before the build; don't download from in here.
+                  gems = resources.map(&:cached_download) + [cached_download]
+                  gems.each do |gem|
+                    system "gem", "install", gem, "--ignore-dependencies", "--no-document", "--install-dir", libexec
+                  end
+                  # The gem's binstub already runs opt/ruby/bin/ruby (stable across ruby upgrades).
+                  (bin/"spacemap").write_env_script libexec/"bin/spacemap", GEM_HOME: libexec, GEM_PATH: libexec
+                end
+
+                test do
+                  assert_match "spacemap #{version}", shell_output("#{bin}/spacemap --version")
+                  # Piped, spacemap waits for the scan and prints one plain frame.
+                  (testpath/"scan").mkpath
+                  (testpath/"scan/big.bin").write("x" * 100_000)
+                  frame = pipe_output("#{bin}/spacemap --logical #{testpath}/scan", "")
+                  assert_match "big.bin", frame
+                  assert_match "in 1 files", frame
+                end
+              end
+            FORMULA
+            formula = formula.sub("@URL@", gem_url("spacemap", version))
+                             .sub("@SHA256@", spacemap.fetch("sha"))
+                             .sub("@RESOURCES@\n", "#{resources.join("\n")}\n")
+
+            path = ENV.fetch("FORMULA")
+            FileUtils.mkdir_p(File.dirname(path))
+            File.write(path, formula)
+            puts "spacemap #{version}: " + resolved.map { |name, r| "#{name} #{r["number"]}" }.join(", ")
+            File.write(ENV.fetch("GITHUB_ENV"), "VERSION=#{version}\n", mode: "a")
+          RUBY
+          git -C tap add -A Formula
+          git -C tap diff --cached
+
+      - name: Install, test and audit the formula
+        run: |
+          if git -C tap diff --cached --quiet; then
+            echo "The formula already points at spacemap $VERSION and the newest dependencies."
+            exit 0
+          fi
+          git -C tap -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "spacemap $VERSION"
+          brew tap satoramoto/tap "$PWD/tap"
+          brew install --build-from-source satoramoto/tap/spacemap
+          brew test satoramoto/tap/spacemap
+          brew audit --strict satoramoto/tap/spacemap
+
+      - name: Push the tap
+        run: |
+          if [ "$(git -C tap rev-list --count origin/main..HEAD)" = 0 ]; then
+            exit 0
+          fi
+          git -C tap push origin HEAD:main

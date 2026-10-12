@@ -1,0 +1,87 @@
+name: Publish
+
+# Runs when a vX.Y.Z tag is pushed: checks the tag matches lib/spacemap/version.rb, the tagged
+# commit is on main and RubyGems doesn't have that version yet, builds the gem, pushes it to
+# RubyGems with trusted publishing (OIDC, no API key) and creates the GitHub Release with the gem
+# and the CHANGELOG.md section as notes. RubyGems' trusted publisher for spacemap names this file
+# (publish.yml) and the "release" environment. See docs/releasing.md.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # gh release create
+      id-token: write # trusted publishing
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Check the tag, the version and that it isn't published yet
+        run: |
+          version="${TAG#v}"
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag '$TAG' isn't vX.Y.Z"
+            exit 1
+          fi
+          code=$(ruby -Ilib -e 'require "spacemap/version"; print Spacemap::VERSION')
+          if [ "$code" != "$version" ]; then
+            echo "::error::lib/spacemap/version.rb says $code but the tag is $TAG"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG ($GITHUB_SHA) isn't on main; tag a commit on main"
+            exit 1
+          fi
+          status=$(curl -sS -o /dev/null -w '%{http_code}' "https://rubygems.org/api/v2/rubygems/spacemap/versions/$version.json")
+          if [ "$status" = 200 ]; then
+            echo "::error::spacemap $version is already on RubyGems; refusing to publish it again"
+            exit 1
+          elif [ "$status" != 404 ]; then
+            echo "::error::couldn't ask RubyGems whether spacemap $version exists (HTTP $status)"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Extract the release notes from CHANGELOG.md
+        run: |
+          ruby -e '
+            version = ENV.fetch("VERSION")
+            notes = File.read("CHANGELOG.md")[/^## #{Regexp.escape(version)}[ \t]*\n(.*?)(?=^## |\z)/m, 1].to_s.strip
+            abort "::error::CHANGELOG.md has no entries under \"## #{version}\"" if notes.empty?
+            File.write(File.join(ENV.fetch("RUNNER_TEMP"), "notes.md"), notes + "\n")
+          '
+
+      - name: Build the gem
+        run: gem build spacemap.gemspec --output "spacemap-$VERSION.gem"
+
+      - name: Get a short-lived RubyGems key through trusted publishing
+        uses: rubygems/configure-rubygems-credentials@v2.1.0 # no floating major tag
+
+      - name: Push the gem to RubyGems
+        run: gem push "spacemap-$VERSION.gem"
+
+      - name: Create the GitHub Release
+        run: |
+          gh release create "v$VERSION" "spacemap-$VERSION.gem" \
+            --verify-tag --title "spacemap $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

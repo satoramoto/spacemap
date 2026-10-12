@@ -1,0 +1,11 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# spacemap [FOLDER]     the dashboard for FOLDER (default: the current folder)
+# spacemap --logical    count reported sizes instead of space on disk
+# spacemap | cat        waits for the scan, prints one plain frame
+# spacemap --help       every option
+
+require_relative "../lib/spacemap"
+
+Spacemap::Program.start(ARGV)
