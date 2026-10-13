@@ -13,13 +13,14 @@ A terminal disk usage browser, like Disk Inventory X: a tree by size, a squarifi
 
 | Command | When |
 |---|---|
-| `bundle exec rake test` | After any change; CI runs it on macOS and Linux |
-| `bundle exec ruby -Itest -Ilib test/<file>_test.rb` | Targeted: one file (`test/<file>_test.rb` for `lib/spacemap/<file>.rb`; `exe_test.rb` runs `exe/spacemap`) |
+| `bundle exec ruby -wc <changed .rb files>` | After any change: the compile check (syntax and warnings), no tests run |
+| `bundle exec rake test` | In a test pass (when asked, or before a PR); CI runs it on macOS and Linux |
+| `bundle exec ruby -Itest -Ilib test/<file>_test.rb` | In a test pass, targeted: one file (`test/<file>_test.rb` for `lib/spacemap/<file>.rb`; `exe_test.rb` runs `exe/spacemap`) |
 | `COLUMNS=140 LINES=45 bundle exec exe/spacemap <folder> \| cat` | After changing the dashboard or drawing: prints one real frame (plain, no terminal needed) |
 
 Tests scan a temporary folder (`test/test_helper.rb`), with logical sizes so they don't depend on the file system's block size. The interactive dashboard needs a terminal; tests drive it through `R2UI::App` (`app.frame`, `app.snapshot`).
 
-CI (`.github/workflows/ci.yml`: macOS and Linux on Ruby 3.4, Linux on Ruby 3.3) is the final check.
+Tests are written to a spec as their own step, not as part of a change; if an existing test breaks, the next test pass or CI catches it. CI (`.github/workflows/ci.yml`: macOS and Linux on Ruby 3.4, Linux on Ruby 3.3) is the final check.
 
 spacemap builds on released r2ui only: the gemspec's `r2ui ~> 0.2.0` from RubyGems, in CI and locally. A new r2ui minor arrives as a Dependabot PR; taking it is spacemap's call. To try an unreleased r2ui locally, set `R2UI_PATH` (`R2UI_PATH=../r2ui bundle exec rake test`), but don't merge code that needs it. Don't change r2ui from this repo; report what you need from it.
 
